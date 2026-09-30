@@ -2,7 +2,7 @@ import math
 import os
 import requests
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from itertools import combinations
 from typing import List, Dict, Any
 from fastapi import FastAPI
@@ -108,7 +108,6 @@ class BetBuilderOptimizer:
         if not selecciones_bajas:
             return []
 
-        # Generar todas las combinaciones posibles de 2 y 3 partidos
         comb_2 = list(combinations(selecciones_bajas, 2))
         comb_3 = list(combinations(selecciones_bajas, 3))
         todas_combinaciones = comb_2 + comb_3
@@ -116,7 +115,6 @@ class BetBuilderOptimizer:
         opciones_validas = []
 
         for comb in todas_combinaciones:
-            # Regla estricta: No apostar dos veces al mismo partido en la misma combinada
             ids_partidos = set([s["id_partido"] for s in comb])
             if len(ids_partidos) < len(comb):
                 continue
@@ -128,7 +126,6 @@ class BetBuilderOptimizer:
                 cuota_acumulada *= s["cuota_oficial"]
                 prob_acumulada *= s["prob_real_num"]
                 
-            # Regla estricta: La cuota final debe rondar el 2.00
             if self.target_min <= cuota_acumulada <= self.target_max:
                 ev_final = ((prob_acumulada * cuota_acumulada) - 1) * 100
                 opciones_validas.append({
@@ -144,7 +141,6 @@ class BetBuilderOptimizer:
         if not opciones_validas:
             return []
             
-        # Devolver únicamente la combinada con mayor probabilidad matemática real de acierto
         opciones_validas.sort(key=lambda x: x["prob_real_num"], reverse=True)
         return [opciones_validas[0]]
 
@@ -159,12 +155,10 @@ class MarketScanner:
         self.builder = BetBuilderOptimizer()
 
     def obtener_deportes_activos(self) -> List[str]:
-        """Extrae el catálogo COMPLETO de competiciones de fútbol y tenis activas a nivel global."""
         if not self.api_key: return []
         try:
             res = requests.get("https://api.the-odds-api.com/v4/sports/", params={"apiKey": self.api_key})
             if res.status_code == 200:
-                # Sin límites. Todo el fútbol y todo el tenis disponible hoy.
                 return [d['key'] for d in res.json() if 'soccer' in d['key'] or 'tennis' in d['key']]
         except: pass
         return []
@@ -172,7 +166,11 @@ class MarketScanner:
     def obtener_partidos_del_dia(self) -> List[Dict[str, Any]]:
         ligas_activas = self.obtener_deportes_activos()
         partidos = []
-        hoy_utc = datetime.now(timezone.utc).date()
+        
+        # Filtro de fecha: Obtenemos el día actual UTC, permitiendo un margen para partidos nocturnos
+        ahora_utc = datetime.now(timezone.utc)
+        limite_inferior = ahora_utc - timedelta(hours=6)
+        limite_superior = ahora_utc + timedelta(hours=24)
         
         for liga in ligas_activas:
             deporte_tipo = "futbol" if "soccer" in liga else "tenis"
@@ -183,9 +181,11 @@ class MarketScanner:
                 response = requests.get(url, params=params)
                 if response.status_code == 200:
                     for match in response.json():
-                        # Regla estricta: Apuestas DIARIAS. Descartar lo que no sea de hoy.
-                        fecha_partido = datetime.strptime(match["commence_time"], "%Y-%m-%dT%H:%M:%SZ").date()
-                        if fecha_partido != hoy_utc: continue
+                        fecha_partido = datetime.strptime(match["commence_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                        
+                        # Solo procesamos si el partido está en la ventana de las próximas 24h
+                        if not (limite_inferior <= fecha_partido <= limite_superior): 
+                            continue
 
                         home = match.get("home_team")
                         away = match.get("away_team")
@@ -207,14 +207,8 @@ class MarketScanner:
                             partidos.append({"id": match["id"], "local": home, "visitante": away, "cuotas": cuotas, "deporte": "tenis"})
             except: continue
                 
-        # FALLBACK PARA PRUEBAS: Si la API no tiene ligas hoy, devuelve datos de control para cumplir la regla
-        if not partidos:
-            return [
-                {"id": "s1", "local": "Bayern M.", "visitante": "Bochum", "cuotas": {"1": 1.15, "X": 7.0, "2": 15.0}, "deporte": "futbol"},
-                {"id": "s2", "local": "Real Madrid", "visitante": "Cadiz", "cuotas": {"1": 1.20, "X": 6.0, "2": 12.0}, "deporte": "futbol"},
-                {"id": "s3", "local": "Alcaraz C.", "visitante": "Ramos A.", "cuotas": {"1": 1.10, "2": 7.5}, "deporte": "tenis"},
-                {"id": "s4", "local": "Man. City", "visitante": "Luton", "cuotas": {"1": 1.18, "X": 6.5, "2": 13.0}, "deporte": "futbol"}
-            ]
+        # LOS DATOS DE PRUEBA (FALLBACK) HAN SIDO ELIMINADOS. 
+        # Si la API no devuelve nada, la lista estará vacía, provocando un error visible en la web.
         return partidos
 
     def escanear_valor_escalera(self) -> Dict[str, Any]:
@@ -252,7 +246,6 @@ class MarketScanner:
                     "Gana Visitante (Tenis)": {"prob": probs["2"], "cuota": p["cuotas"]["2"]}
                 }
 
-            # Extraer las cuotas base de alta probabilidad para combinarlas
             for nombre_mercado, datos in mercados_disponibles.items():
                 if 1.10 <= datos["cuota"] <= 1.65 and datos["prob"] >= 0.65:
                     selecciones_seguras.append({
@@ -279,9 +272,18 @@ scanner = MarketScanner()
 
 @app.get("/api/datos")
 def get_datos_api():
+    if not scanner.api_key:
+        return {"status": "error", "mensaje": "ERROR: Falta configurar la variable ODDS_API_KEY en tu servidor de Render."}
+
     resultados = scanner.escanear_valor_escalera()
+    
+    # Si la lista de partidos simples está vacía, sabemos seguro que la API no entregó datos.
+    if not resultados["selecciones_simples_seguras"]:
+         return {"status": "error", "mensaje": "ERROR DE API: The-Odds-API no devolvió partidos reales para hoy. Comprueba el uso de tu clave o si hay partidos activos."}
+
     if not resultados["combinadas_reto_escalera"]:
-        return {"status": "vacio", "mensaje": "Imposible generar Cuota 2.00 estricta hoy con los partidos disponibles."}
+        return {"status": "vacio", "mensaje": "Hay partidos activos hoy, pero no se pudo generar ninguna combinada exacta de Cuota 2.00 con la seguridad suficiente."}
+    
     return {"status": "ok", "resultados": resultados}
 
 @app.get("/", response_class=HTMLResponse)
@@ -343,7 +345,7 @@ def home():
                     if (data.status === 'error' || data.status === 'vacio') {
                         const errContainer = document.getElementById('error-container');
                         errContainer.classList.remove('hidden');
-                        errContainer.innerHTML = `<p class="font-semibold text-lg">${data.mensaje}</p>`;
+                        errContainer.innerHTML = `<p class="font-semibold text-lg text-rose-400">${data.mensaje}</p>`;
                         return;
                     }
 
@@ -384,7 +386,7 @@ def home():
                     document.getElementById('loading').classList.add('hidden');
                     const errContainer = document.getElementById('error-container');
                     errContainer.classList.remove('hidden');
-                    errContainer.innerHTML = `<p class="font-bold text-red-400">Error de conexión.</p>`;
+                    errContainer.innerHTML = `<p class="font-bold text-red-400">Error interno del servidor. Revisa los logs de Render.</p>`;
                 }
             }
 

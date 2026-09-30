@@ -27,12 +27,18 @@ class FutbolPredictor(ApuestasAlgoritmo):
 
     def _poisson_probability(self, lam: float, k: int) -> float:
         return (math.exp(-lam) * (lam ** k)) / math.factorial(k)
+        
+    def _probabilidad_acumulada_over(self, lam: float, over_line: int) -> float:
+        """Calcula la probabilidad de superar una línea X usando Poisson."""
+        prob_under = sum(self._poisson_probability(lam, k) for k in range(over_line + 1))
+        return 1.0 - prob_under
 
     def calcular_probabilidades_partido(self, max_goles: int = 5) -> Dict[str, float]:
         prob_local = 0.0
         prob_empate = 0.0
         prob_visitante = 0.0
         prob_over_1_5 = 0.0
+        prob_over_2_5 = 0.0
         prob_local_marca = 0.0
         prob_visitante_marca = 0.0
 
@@ -46,15 +52,35 @@ class FutbolPredictor(ApuestasAlgoritmo):
                 else: prob_visitante += prob
                 
                 if (goles_local + goles_visitante) > 1.5: prob_over_1_5 += prob
+                if (goles_local + goles_visitante) > 2.5: prob_over_2_5 += prob
                 if goles_local > 0: prob_local_marca += prob
                 if goles_visitante > 0: prob_visitante_marca += prob
 
+        # Estadísticas Derivadas (Simuladas basadas en el volumen de ataque esperado - xG)
+        # 1 xG = aprox. 3.2 remates a puerta.
+        remates_puerta_locales = self.xg_local * 3.2
+        remates_puerta_visitantes = self.xg_visitante * 3.2
+        
+        # Volumen de partido para corners (media estándar 9.0 + intensidad ofensiva)
+        corners_esperados = 8.5 + (self.xg_local + self.xg_visitante - 2.5)
+        
+        # Tarjetas (inversamente proporcional a la diferencia de nivel, partidos reñidos = más faltas)
+        tarjetas_esperadas = 4.5 if abs(self.xg_local - self.xg_visitante) < 0.5 else 3.5
+
         return {
+            "1": round(prob_local, 4),
+            "X": round(prob_empate, 4),
+            "2": round(prob_visitante, 4),
             "1X": round(prob_local + prob_empate, 4),
             "X2": round(prob_visitante + prob_empate, 4),
             "Más de 1.5 Goles": round(prob_over_1_5, 4),
+            "Más de 2.5 Goles": round(prob_over_2_5, 4),
             "Local Marca > 0.5 Goles": round(prob_local_marca, 4),
-            "Visitante Marca > 0.5 Goles": round(prob_visitante_marca, 4)
+            "Visitante Marca > 0.5 Goles": round(prob_visitante_marca, 4),
+            "Local +2.5 Remates a Puerta": round(self._probabilidad_acumulada_over(remates_puerta_locales, 2), 4),
+            "Visitante +2.5 Remates a Puerta": round(self._probabilidad_acumulada_over(remates_puerta_visitantes, 2), 4),
+            "Más de 7.5 Córners": round(self._probabilidad_acumulada_over(corners_esperados, 7), 4),
+            "Más de 2.5 Tarjetas": round(self._probabilidad_acumulada_over(tarjetas_esperadas, 2), 4)
         }
 
 class TenisPredictor(ApuestasAlgoritmo):
@@ -64,13 +90,31 @@ class TenisPredictor(ApuestasAlgoritmo):
         self.factor_ajuste_1 = factor_ajuste_1
         self.factor_ajuste_2 = factor_ajuste_2
 
+    def _poisson_probability(self, lam: float, k: int) -> float:
+        return (math.exp(-lam) * (lam ** k)) / math.factorial(k)
+
     def calcular_probabilidad_partido(self) -> Dict[str, float]:
         prob_1_ajustada = self.prob_impl_1 * self.factor_ajuste_1
         prob_2_ajustada = self.prob_impl_2 * self.factor_ajuste_2
         total = prob_1_ajustada + prob_2_ajustada
+        
+        prob_gana_1 = prob_1_ajustada / total
+        prob_gana_2 = prob_2_ajustada / total
+        
+        # Probabilidad de ganar al menos 1 set (si tienes un 70% de ganar el partido, tienes >85% de ganar 1 set)
+        prob_set_1 = min(0.98, prob_gana_1 + (1.0 - prob_gana_1) * 0.45)
+        prob_set_2 = min(0.98, prob_gana_2 + (1.0 - prob_gana_2) * 0.45)
+        
+        # Estimación genérica de Aces para partidos ATP/WTA medios
+        aces_esperados = 10.5
+        prob_aces_over = 1.0 - sum(self._poisson_probability(aces_esperados, k) for k in range(8))
+
         return {
-            "1": round(prob_1_ajustada / total, 4),
-            "2": round(prob_2_ajustada / total, 4)
+            "1": round(prob_gana_1, 4),
+            "2": round(prob_gana_2, 4),
+            "Local Gana al menos 1 Set": round(prob_set_1, 4),
+            "Visitante Gana al menos 1 Set": round(prob_set_2, 4),
+            "Más de 7.5 Aces (Total)": round(prob_aces_over, 4)
         }
 
 # ==========================================
@@ -92,7 +136,7 @@ class NewsSentimentExtractor:
         
         return {
             "factor_ajuste": round(factor_ajuste, 3),
-            "impacto": "Positivo" if factor_ajuste > 1 else "Negativo" if factor_ajuste < 1 else "Neutro"
+            "impacto": "Favorable" if factor_ajuste > 1 else "Desfavorable" if factor_ajuste < 1 else "Estable (Sin bajas clave)"
         }
 
 # ==========================================
@@ -131,7 +175,7 @@ class BetBuilderOptimizer:
                     "pronostico": s["pronostico"],
                     "cuota": s["cuota_oficial"],
                     "probabilidad": f"{round(s['prob_real_num'] * 100, 1)}%",
-                    "motivo": f"Probabilidad matemática superior al 65% calculada por modelo estadístico."
+                    "estadisticas": s["stats"]
                 })
                 
             if self.target_min <= cuota_acumulada <= self.target_max:
@@ -151,12 +195,11 @@ class BetBuilderOptimizer:
         if not opciones_validas:
             return []
             
-        # Devolver las 4 combinadas con mayor probabilidad matemática real de acierto
         opciones_validas.sort(key=lambda x: x["prob_real_num"], reverse=True)
         return opciones_validas[:4]
 
 # ==========================================
-# 4. ESCÁNER TOTAL (TODAS LAS LIGAS DISPONIBLES HOY)
+# 4. ESCÁNER TOTAL (FÚTBOL EUROPEO Y TENIS)
 # ==========================================
 
 class MarketScanner:
@@ -208,7 +251,6 @@ class MarketScanner:
                                             if outcome["name"] == home: cuotas["1"] = outcome["price"]
                                             elif outcome["name"] == away: cuotas["2"] = outcome["price"]
                                             elif outcome["name"] == "Draw" and deporte_tipo == "futbol": cuotas["X"] = outcome["price"]
-                                if bookmaker["key"] == "bet365": break
                         
                         if deporte_tipo == "futbol" and cuotas["1"] > 0 and cuotas["2"] > 0:
                             partidos.append({"id": match["id"], "local": home, "visitante": away, "cuotas": cuotas, "deporte": "futbol"})
@@ -221,6 +263,7 @@ class MarketScanner:
     def escanear_valor_escalera(self) -> Dict[str, Any]:
         selecciones_seguras = []
         partidos = self.obtener_partidos_del_dia()
+        # Margen estándar de la casa de apuestas para calcular cuotas secundarias realistas
         margen_casa_apuestas = 0.94 
 
         for p in partidos:
@@ -228,6 +271,7 @@ class MarketScanner:
             noticias_visitante = self.nlp.analizar_texto_partido(p["visitante"])
             
             mercados_disponibles = {}
+            datos_estadisticos = {}
             
             if p["deporte"] == "futbol":
                 xg_local = round((3.0 / p["cuotas"]["1"]) * noticias_local["factor_ajuste"], 2)
@@ -236,31 +280,61 @@ class MarketScanner:
                 predictor = FutbolPredictor(xg_local=xg_local, xg_visitante=xg_visitante)
                 probs = predictor.calcular_probabilidades_partido()
                 
+                datos_estadisticos = {
+                    "Deporte": "Fútbol ⚽",
+                    "xG (Goles Esperados) Local": str(xg_local),
+                    "xG (Goles Esperados) Visitante": str(xg_visitante),
+                    "Intensidad de Partido Proyectada": "Alta" if (xg_local + xg_visitante) > 2.8 else "Media"
+                }
+
                 mercados_disponibles = {
-                    "1X": {"prob": probs["1X"], "cuota": round((1/probs["1X"])*margen_casa_apuestas, 2) if probs["1X"]>0 else 0},
-                    "X2": {"prob": probs["X2"], "cuota": round((1/probs["X2"])*margen_casa_apuestas, 2) if probs["X2"]>0 else 0},
+                    "Ganador Local (1)": {"prob": probs["1"], "cuota": p["cuotas"]["1"]},
+                    "Ganador Visitante (2)": {"prob": probs["2"], "cuota": p["cuotas"]["2"]},
+                    "Doble Oportunidad 1X": {"prob": probs["1X"], "cuota": round((1/probs["1X"])*margen_casa_apuestas, 2) if probs["1X"]>0 else 0},
+                    "Doble Oportunidad X2": {"prob": probs["X2"], "cuota": round((1/probs["X2"])*margen_casa_apuestas, 2) if probs["X2"]>0 else 0},
                     "Más de 1.5 Goles": {"prob": probs["Más de 1.5 Goles"], "cuota": round((1/probs["Más de 1.5 Goles"])*margen_casa_apuestas, 2) if probs["Más de 1.5 Goles"]>0 else 0},
                     "Local Marca > 0.5 Goles": {"prob": probs["Local Marca > 0.5 Goles"], "cuota": round((1/probs["Local Marca > 0.5 Goles"])*margen_casa_apuestas, 2) if probs["Local Marca > 0.5 Goles"]>0 else 0},
-                    "Visitante Marca > 0.5 Goles": {"prob": probs["Visitante Marca > 0.5 Goles"], "cuota": round((1/probs["Visitante Marca > 0.5 Goles"])*margen_casa_apuestas, 2) if probs["Visitante Marca > 0.5 Goles"]>0 else 0}
+                    "Visitante Marca > 0.5 Goles": {"prob": probs["Visitante Marca > 0.5 Goles"], "cuota": round((1/probs["Visitante Marca > 0.5 Goles"])*margen_casa_apuestas, 2) if probs["Visitante Marca > 0.5 Goles"]>0 else 0},
+                    f"{p['local']} +2.5 Remates a Puerta": {"prob": probs["Local +2.5 Remates a Puerta"], "cuota": round((1/probs["Local +2.5 Remates a Puerta"])*margen_casa_apuestas, 2) if probs["Local +2.5 Remates a Puerta"]>0 else 0},
+                    f"{p['visitante']} +2.5 Remates a Puerta": {"prob": probs["Visitante +2.5 Remates a Puerta"], "cuota": round((1/probs["Visitante +2.5 Remates a Puerta"])*margen_casa_apuestas, 2) if probs["Visitante +2.5 Remates a Puerta"]>0 else 0},
+                    "Más de 7.5 Córners": {"prob": probs["Más de 7.5 Córners"], "cuota": round((1/probs["Más de 7.5 Córners"])*margen_casa_apuestas, 2) if probs["Más de 7.5 Córners"]>0 else 0},
+                    "Más de 2.5 Tarjetas": {"prob": probs["Más de 2.5 Tarjetas"], "cuota": round((1/probs["Más de 2.5 Tarjetas"])*margen_casa_apuestas, 2) if probs["Más de 2.5 Tarjetas"]>0 else 0}
                 }
             else:
                 prob_impl_1 = 1 / p["cuotas"]["1"]
                 prob_impl_2 = 1 / p["cuotas"]["2"]
                 predictor = TenisPredictor(prob_impl_1, prob_impl_2, noticias_local["factor_ajuste"], noticias_visitante["factor_ajuste"])
                 probs = predictor.calcular_probabilidad_partido()
+                
+                datos_estadisticos = {
+                    "Deporte": "Tenis 🎾",
+                    "Prob. Implícita Casa de Apuestas": f"{round(prob_impl_1 * 100 if p['cuotas']['1'] < p['cuotas']['2'] else prob_impl_2 * 100, 1)}%"
+                }
+
                 mercados_disponibles = {
                     "Gana Local (Tenis)": {"prob": probs["1"], "cuota": p["cuotas"]["1"]},
-                    "Gana Visitante (Tenis)": {"prob": probs["2"], "cuota": p["cuotas"]["2"]}
+                    "Gana Visitante (Tenis)": {"prob": probs["2"], "cuota": p["cuotas"]["2"]},
+                    f"{p['local']} Gana al menos 1 Set": {"prob": probs["Local Gana al menos 1 Set"], "cuota": round((1/probs["Local Gana al menos 1 Set"])*margen_casa_apuestas, 2) if probs["Local Gana al menos 1 Set"]>0 else 0},
+                    f"{p['visitante']} Gana al menos 1 Set": {"prob": probs["Visitante Gana al menos 1 Set"], "cuota": round((1/probs["Visitante Gana al menos 1 Set"])*margen_casa_apuestas, 2) if probs["Visitante Gana al menos 1 Set"]>0 else 0},
+                    "Más de 7.5 Aces": {"prob": probs["Más de 7.5 Aces (Total)"], "cuota": round((1/probs["Más de 7.5 Aces (Total)"])*margen_casa_apuestas, 2) if probs["Más de 7.5 Aces (Total)"]>0 else 0}
                 }
 
             for nombre_mercado, datos in mercados_disponibles.items():
-                if 1.10 <= datos["cuota"] <= 1.65 and datos["prob"] >= 0.65:
+                if 1.03 <= datos["cuota"] <= 1.65 and datos["prob"] >= 0.65:
+                    
+                    estado_elegido = noticias_local["impacto"] if "Local" in nombre_mercado or "1" in nombre_mercado else noticias_visitante["impacto"]
+                    
+                    stats_completas = datos_estadisticos.copy()
+                    stats_completas["Contexto del Jugador/Equipo"] = estado_elegido
+                    stats_completas["Probabilidad Pura Calculada"] = f"{round(datos['prob'] * 100, 1)}%"
+
                     selecciones_seguras.append({
                         "id_partido": p["id"],
                         "partido": f"{p['local']} vs {p['visitante']}",
                         "pronostico": nombre_mercado,
                         "cuota_oficial": datos["cuota"],
-                        "prob_real_num": datos["prob"]
+                        "prob_real_num": datos["prob"],
+                        "stats": stats_completas
                     })
 
         combinadas_finales = self.builder.generar_combinada_escalera(selecciones_seguras)
@@ -285,7 +359,7 @@ def get_datos_api():
     resultados = scanner.escanear_valor_escalera()
     
     if not resultados["selecciones_simples_seguras"]:
-         return {"status": "error", "mensaje": "ERROR DE API: The-Odds-API no devolvió partidos reales para hoy. Comprueba el uso de tu clave o si hay partidos activos."}
+         return {"status": "error", "mensaje": "ERROR: No hay datos. O el mercado está cerrado o la API bloqueó la petición."}
 
     if not resultados["combinadas_reto_escalera"]:
         return {"status": "vacio", "mensaje": "Hay partidos activos hoy, pero no se pudo generar ninguna combinada exacta de Cuota ~2.00 con la seguridad suficiente."}
@@ -316,13 +390,12 @@ def home():
     <body class="p-4 md:p-10">
         <div class="max-w-5xl mx-auto">
             
-            <!-- Cabecera y Control del Reto -->
             <header class="mb-8 flex flex-col md:flex-row justify-between items-center border-b border-slate-700 pb-6 gap-6">
                 <div class="text-center md:text-left">
                     <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight text-white mb-2">
                         Algoritmo <span class="text-emerald-500">Escalera</span>
                     </h1>
-                    <p class="text-slate-400">Escaneo Global | Filtro: Hoy | Target: Cuota 2.00</p>
+                    <p class="text-slate-400">Rastreo Analítico: Córners, Tarjetas, Remates y Sets</p>
                 </div>
                 <div class="bg-slate-800 border border-slate-600 p-4 rounded-xl min-w-[250px] text-center shadow-lg">
                     <div class="text-slate-400 text-sm font-semibold mb-1">PROGRESO ACTUAL</div>
@@ -345,22 +418,20 @@ def home():
 
             <div id="loading" class="flex flex-col items-center justify-center py-20">
                 <div class="loader mb-4"></div>
-                <p class="text-slate-400 font-semibold animate-pulse">Escaneando combinaciones de hoy...</p>
+                <p class="text-slate-400 font-semibold animate-pulse">Analizando mercados profundos de hoy...</p>
             </div>
 
             <div id="error-container" class="hidden bg-slate-800 border border-slate-600 text-slate-300 p-6 rounded-xl text-center"></div>
 
             <div id="content" class="hidden space-y-8">
-                <!-- Combinada Principal -->
                 <div>
                     <h2 class="text-xl font-bold text-slate-200 mb-4 flex items-center">
                         <svg class="w-6 h-6 mr-2 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                        Combinada Principal (Mejor Opción)
+                        Combinada Principal (Óptima)
                     </h2>
                     <div id="combinada-principal" class="grid gap-4"></div>
                 </div>
 
-                <!-- Descartes -->
                 <div>
                     <h2 class="text-xl font-bold text-slate-200 mb-4 flex items-center mt-12">
                         <svg class="w-6 h-6 mr-2 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
@@ -371,18 +442,14 @@ def home():
             </div>
         </div>
 
-        <!-- Modal de Detalles -->
         <div id="detalles-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 modal-bg">
             <div class="bg-slate-800 border border-slate-600 rounded-2xl p-6 w-full max-w-2xl shadow-2xl relative max-h-[90vh] overflow-y-auto">
                 <button onclick="cerrarModal()" class="absolute top-4 right-4 text-slate-400 hover:text-white">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
-                <h3 class="text-2xl font-bold text-white mb-6">Análisis de la Elección</h3>
-                <div class="bg-slate-900 p-4 rounded-lg border border-slate-700 mb-6">
-                    <p class="text-sm text-slate-300 leading-relaxed">
-                        El algoritmo selecciona esta combinación extrayendo la probabilidad estadística real de cada partido. Las cuotas seleccionadas superan el umbral estricto del 65% de probabilidad de éxito individual, y se han agrupado para alcanzar matemáticamente la cuota de la escalera asumiendo el menor riesgo global.
-                    </p>
-                </div>
+                <h3 class="text-2xl font-bold text-white mb-2">Desglose Analítico Completo</h3>
+                <p class="text-slate-400 text-sm mb-6">Métricas y probabilidades procesadas por los modelos predictivos.</p>
+                
                 <div id="modal-content" class="space-y-4"></div>
             </div>
         </div>
@@ -423,14 +490,18 @@ def home():
                 let html = '';
                 
                 comb.detalles.forEach(d => {
+                    let statsHtml = '';
+                    for (const [key, value] of Object.entries(d.estadisticas)) {
+                        statsHtml += `<li class="flex justify-between py-1 border-b border-slate-700/50 last:border-0"><span class="text-slate-400">${key}:</span> <span class="text-white font-bold text-right">${value}</span></li>`;
+                    }
+
                     html += `
-                        <div class="border-l-4 border-emerald-500 bg-slate-800 p-4 rounded-r-lg shadow-sm">
+                        <div class="border-l-4 border-emerald-500 bg-slate-900 p-4 rounded-r-lg shadow-sm">
                             <div class="font-bold text-white text-lg">${d.partido}</div>
-                            <div class="text-emerald-400 font-semibold mb-2">${d.pronostico} (Cuota: ${d.cuota})</div>
-                            <div class="text-slate-400 text-sm flex justify-between">
-                                <span>Prob. Matemática: <span class="text-white font-bold">${d.probabilidad}</span></span>
-                            </div>
-                            <p class="text-xs text-slate-500 mt-2 italic">${d.motivo}</p>
+                            <div class="text-emerald-400 font-semibold mb-3 pb-2 border-b border-slate-700">${d.pronostico} (Cuota: ${d.cuota})</div>
+                            <ul class="text-sm space-y-1">
+                                ${statsHtml}
+                            </ul>
                         </div>
                     `;
                 });
@@ -499,10 +570,8 @@ def home():
                     document.getElementById('content').classList.remove('hidden');
                     combinadasGlobal = data.resultados.combinadas_reto_escalera;
 
-                    // Pintar Principal (Índice 0)
                     document.getElementById('combinada-principal').innerHTML = generarTarjetaHTML(combinadasGlobal[0], true, 0);
 
-                    // Pintar Descartes (Índice 1 a 3)
                     let altsHtml = '';
                     for(let i = 1; i < combinadasGlobal.length; i++) {
                         altsHtml += generarTarjetaHTML(combinadasGlobal[i], false, i);

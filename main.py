@@ -114,24 +114,34 @@ class BetBuilderOptimizer:
         
         opciones_validas = []
 
-        for comb in todas_combinaciones:
+        for idx, comb in enumerate(todas_combinaciones):
             ids_partidos = set([s["id_partido"] for s in comb])
             if len(ids_partidos) < len(comb):
                 continue
                 
             cuota_acumulada = 1.0
             prob_acumulada = 1.0
+            detalles_partidos = []
             
             for s in comb:
                 cuota_acumulada *= s["cuota_oficial"]
                 prob_acumulada *= s["prob_real_num"]
+                detalles_partidos.append({
+                    "partido": s["partido"],
+                    "pronostico": s["pronostico"],
+                    "cuota": s["cuota_oficial"],
+                    "probabilidad": f"{round(s['prob_real_num'] * 100, 1)}%",
+                    "motivo": f"Probabilidad matemática superior al 65% calculada por modelo estadístico."
+                })
                 
             if self.target_min <= cuota_acumulada <= self.target_max:
                 ev_final = ((prob_acumulada * cuota_acumulada) - 1) * 100
                 opciones_validas.append({
+                    "id": f"comb_{idx}",
                     "tipo": f"Reto Escalera ({len(comb)} Partidos)",
                     "partidos": [s["partido"] for s in comb],
                     "pronosticos": [f"{s['pronostico']} (@{s['cuota_oficial']})" for s in comb],
+                    "detalles": detalles_partidos,
                     "cuota_total": round(cuota_acumulada, 2),
                     "prob_real_num": prob_acumulada,
                     "probabilidad_conjunta": f"{round(prob_acumulada * 100, 1)}%",
@@ -141,8 +151,9 @@ class BetBuilderOptimizer:
         if not opciones_validas:
             return []
             
+        # Devolver las 4 combinadas con mayor probabilidad matemática real de acierto
         opciones_validas.sort(key=lambda x: x["prob_real_num"], reverse=True)
-        return [opciones_validas[0]]
+        return opciones_validas[:4]
 
 # ==========================================
 # 4. ESCÁNER TOTAL (TODAS LAS LIGAS DISPONIBLES HOY)
@@ -167,7 +178,6 @@ class MarketScanner:
         ligas_activas = self.obtener_deportes_activos()
         partidos = []
         
-        # Filtro de fecha: Obtenemos el día actual UTC, permitiendo un margen para partidos nocturnos
         ahora_utc = datetime.now(timezone.utc)
         limite_inferior = ahora_utc - timedelta(hours=6)
         limite_superior = ahora_utc + timedelta(hours=24)
@@ -183,7 +193,6 @@ class MarketScanner:
                     for match in response.json():
                         fecha_partido = datetime.strptime(match["commence_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
                         
-                        # Solo procesamos si el partido está en la ventana de las próximas 24h
                         if not (limite_inferior <= fecha_partido <= limite_superior): 
                             continue
 
@@ -207,8 +216,6 @@ class MarketScanner:
                             partidos.append({"id": match["id"], "local": home, "visitante": away, "cuotas": cuotas, "deporte": "tenis"})
             except: continue
                 
-        # LOS DATOS DE PRUEBA (FALLBACK) HAN SIDO ELIMINADOS. 
-        # Si la API no devuelve nada, la lista estará vacía, provocando un error visible en la web.
         return partidos
 
     def escanear_valor_escalera(self) -> Dict[str, Any]:
@@ -256,11 +263,11 @@ class MarketScanner:
                         "prob_real_num": datos["prob"]
                     })
 
-        combinada_final = self.builder.generar_combinada_escalera(selecciones_seguras)
+        combinadas_finales = self.builder.generar_combinada_escalera(selecciones_seguras)
 
         return {
             "selecciones_simples_seguras": selecciones_seguras,
-            "combinadas_reto_escalera": combinada_final
+            "combinadas_reto_escalera": combinadas_finales
         }
 
 # ==========================================
@@ -277,12 +284,11 @@ def get_datos_api():
 
     resultados = scanner.escanear_valor_escalera()
     
-    # Si la lista de partidos simples está vacía, sabemos seguro que la API no entregó datos.
     if not resultados["selecciones_simples_seguras"]:
          return {"status": "error", "mensaje": "ERROR DE API: The-Odds-API no devolvió partidos reales para hoy. Comprueba el uso de tu clave o si hay partidos activos."}
 
     if not resultados["combinadas_reto_escalera"]:
-        return {"status": "vacio", "mensaje": "Hay partidos activos hoy, pero no se pudo generar ninguna combinada exacta de Cuota 2.00 con la seguridad suficiente."}
+        return {"status": "vacio", "mensaje": "Hay partidos activos hoy, pero no se pudo generar ninguna combinada exacta de Cuota ~2.00 con la seguridad suficiente."}
     
     return {"status": "ok", "resultados": resultados}
 
@@ -304,38 +310,179 @@ def home():
             @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
             .ev-positive { background-color: #059669; }
             .ev-negative { background-color: #dc2626; }
+            .modal-bg { background-color: rgba(15, 23, 42, 0.85); backdrop-filter: blur(4px); }
         </style>
     </head>
     <body class="p-4 md:p-10">
-        <div class="max-w-4xl mx-auto">
-            <header class="mb-10 text-center md:text-left border-b border-slate-700 pb-6">
-                <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight text-white mb-2">
-                    Algoritmo <span class="text-emerald-500">Reto Escalera</span>
-                </h1>
-                <p class="text-slate-400">Escaneo Global | Filtro: Hoy | Combinada 2 o 3 Partidos | Target: Cuota 2.00</p>
+        <div class="max-w-5xl mx-auto">
+            
+            <!-- Cabecera y Control del Reto -->
+            <header class="mb-8 flex flex-col md:flex-row justify-between items-center border-b border-slate-700 pb-6 gap-6">
+                <div class="text-center md:text-left">
+                    <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight text-white mb-2">
+                        Algoritmo <span class="text-emerald-500">Escalera</span>
+                    </h1>
+                    <p class="text-slate-400">Escaneo Global | Filtro: Hoy | Target: Cuota 2.00</p>
+                </div>
+                <div class="bg-slate-800 border border-slate-600 p-4 rounded-xl min-w-[250px] text-center shadow-lg">
+                    <div class="text-slate-400 text-sm font-semibold mb-1">PROGRESO ACTUAL</div>
+                    <div class="flex justify-around items-center mb-3">
+                        <div>
+                            <div class="text-xs text-slate-500">Paso</div>
+                            <div id="step-counter" class="text-2xl font-black text-white">1</div>
+                        </div>
+                        <div class="h-8 w-px bg-slate-600"></div>
+                        <div>
+                            <div class="text-xs text-slate-500">Banca</div>
+                            <div id="bankroll-counter" class="text-2xl font-black text-emerald-400">30.00€</div>
+                        </div>
+                    </div>
+                    <div class="flex gap-2 justify-center">
+                        <button onclick="resetearEscalera()" class="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-xs rounded font-bold transition">Reset</button>
+                    </div>
+                </div>
             </header>
 
             <div id="loading" class="flex flex-col items-center justify-center py-20">
                 <div class="loader mb-4"></div>
-                <p class="text-slate-400 font-semibold animate-pulse">Escaneando todos los partidos mundiales de hoy...</p>
+                <p class="text-slate-400 font-semibold animate-pulse">Escaneando combinaciones de hoy...</p>
             </div>
 
-            <div id="error-container" class="hidden bg-slate-800 border border-slate-600 text-slate-300 p-6 rounded-xl text-center">
-            </div>
+            <div id="error-container" class="hidden bg-slate-800 border border-slate-600 text-slate-300 p-6 rounded-xl text-center"></div>
 
             <div id="content" class="hidden space-y-8">
+                <!-- Combinada Principal -->
                 <div>
                     <h2 class="text-xl font-bold text-slate-200 mb-4 flex items-center">
-                        <svg class="w-6 h-6 mr-2 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-                        Apuesta Escalera de HOY (Exacta)
+                        <svg class="w-6 h-6 mr-2 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        Combinada Principal (Mejor Opción)
                     </h2>
-                    <div id="combinada-container" class="grid gap-4"></div>
+                    <div id="combinada-principal" class="grid gap-4"></div>
+                </div>
+
+                <!-- Descartes -->
+                <div>
+                    <h2 class="text-xl font-bold text-slate-200 mb-4 flex items-center mt-12">
+                        <svg class="w-6 h-6 mr-2 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                        Alternativas de Respaldo
+                    </h2>
+                    <div id="combinadas-alternativas" class="grid md:grid-cols-3 gap-4"></div>
                 </div>
             </div>
         </div>
 
+        <!-- Modal de Detalles -->
+        <div id="detalles-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 modal-bg">
+            <div class="bg-slate-800 border border-slate-600 rounded-2xl p-6 w-full max-w-2xl shadow-2xl relative max-h-[90vh] overflow-y-auto">
+                <button onclick="cerrarModal()" class="absolute top-4 right-4 text-slate-400 hover:text-white">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+                <h3 class="text-2xl font-bold text-white mb-6">Análisis de la Elección</h3>
+                <div class="bg-slate-900 p-4 rounded-lg border border-slate-700 mb-6">
+                    <p class="text-sm text-slate-300 leading-relaxed">
+                        El algoritmo selecciona esta combinación extrayendo la probabilidad estadística real de cada partido. Las cuotas seleccionadas superan el umbral estricto del 65% de probabilidad de éxito individual, y se han agrupado para alcanzar matemáticamente la cuota de la escalera asumiendo el menor riesgo global.
+                    </p>
+                </div>
+                <div id="modal-content" class="space-y-4"></div>
+            </div>
+        </div>
+
         <script>
+            let combinadasGlobal = [];
+            let currentStep = parseInt(localStorage.getItem('escalera_step')) || 1;
+            let currentBankroll = parseFloat(localStorage.getItem('escalera_bankroll')) || 30.00;
+
+            function actualizarUIEscalera() {
+                document.getElementById('step-counter').innerText = currentStep;
+                document.getElementById('bankroll-counter').innerText = currentBankroll.toFixed(2) + '€';
+            }
+
+            function resetearEscalera() {
+                if(confirm("¿Seguro que quieres reiniciar la escalera a 30€?")) {
+                    currentStep = 1;
+                    currentBankroll = 30.00;
+                    localStorage.setItem('escalera_step', currentStep);
+                    localStorage.setItem('escalera_bankroll', currentBankroll);
+                    actualizarUIEscalera();
+                }
+            }
+
+            function registrarVictoria(cuota) {
+                if(confirm(`¿Confirmar victoria a cuota ${cuota}? Tu banca se multiplicará.`)) {
+                    currentBankroll = currentBankroll * cuota;
+                    currentStep += 1;
+                    localStorage.setItem('escalera_step', currentStep);
+                    localStorage.setItem('escalera_bankroll', currentBankroll);
+                    actualizarUIEscalera();
+                }
+            }
+
+            function abrirModal(index) {
+                const comb = combinadasGlobal[index];
+                const content = document.getElementById('modal-content');
+                let html = '';
+                
+                comb.detalles.forEach(d => {
+                    html += `
+                        <div class="border-l-4 border-emerald-500 bg-slate-800 p-4 rounded-r-lg shadow-sm">
+                            <div class="font-bold text-white text-lg">${d.partido}</div>
+                            <div class="text-emerald-400 font-semibold mb-2">${d.pronostico} (Cuota: ${d.cuota})</div>
+                            <div class="text-slate-400 text-sm flex justify-between">
+                                <span>Prob. Matemática: <span class="text-white font-bold">${d.probabilidad}</span></span>
+                            </div>
+                            <p class="text-xs text-slate-500 mt-2 italic">${d.motivo}</p>
+                        </div>
+                    `;
+                });
+                
+                content.innerHTML = html;
+                document.getElementById('detalles-modal').classList.remove('hidden');
+            }
+
+            function cerrarModal() {
+                document.getElementById('detalles-modal').classList.add('hidden');
+            }
+
+            function generarTarjetaHTML(comb, isPrincipal, index) {
+                let partidosHtml = '';
+                comb.partidos.forEach((partido, idx) => {
+                    partidosHtml += `<div class="mb-2 bg-slate-900 p-3 rounded border border-slate-700">
+                        <div class="font-bold text-white">${partido}</div>
+                        <div class="text-emerald-400 text-sm mt-1">Pronóstico: ${comb.pronosticos[idx]}</div>
+                    </div>`;
+                });
+
+                const evClass = comb.ev_conjunto.includes('-') ? 'ev-negative' : 'ev-positive';
+                const borderClass = isPrincipal ? 'border-2 border-emerald-500/50 shadow-[0_0_20px_rgba(16,185,129,0.15)]' : 'border border-slate-600 hover:border-slate-500 opacity-90 transition';
+                const sizeClass = isPrincipal ? 'p-6' : 'p-5';
+
+                return `
+                    <div class="card ${sizeClass} rounded-xl relative overflow-hidden ${borderClass}">
+                        <div class="absolute top-0 right-0 ${evClass} text-white text-xs font-bold px-3 py-1 rounded-bl-lg">EV ${comb.ev_conjunto}</div>
+                        <h3 class="text-lg font-bold mb-4 text-emerald-400">${isPrincipal ? 'Opción Óptima' : 'Alternativa ' + index}</h3>
+                        ${partidosHtml}
+                        
+                        <div class="mt-5 flex justify-between items-end border-t border-slate-700 pt-4 mb-4">
+                            <div>
+                                <div class="text-slate-400 text-sm">Probabilidad</div>
+                                <div class="text-xl font-bold text-emerald-400">${comb.probabilidad_conjunta}</div>
+                            </div>
+                            <div class="text-right">
+                                <div class="text-slate-400 text-sm">Cuota</div>
+                                <div class="text-3xl font-extrabold text-white">${comb.cuota_total}</div>
+                            </div>
+                        </div>
+
+                        <div class="flex gap-2 mt-2">
+                            <button onclick="abrirModal(${index})" class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded font-semibold text-sm transition">Ver Análisis</button>
+                            ${isPrincipal ? `<button onclick="registrarVictoria(${comb.cuota_total})" class="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold text-sm transition flex items-center justify-center"><svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg> Ganada</button>` : ''}
+                        </div>
+                    </div>
+                `;
+            }
+
             async function cargarDatos() {
+                actualizarUIEscalera();
                 try {
                     const response = await fetch('/api/datos');
                     const data = await response.json();
@@ -350,43 +497,23 @@ def home():
                     }
 
                     document.getElementById('content').classList.remove('hidden');
+                    combinadasGlobal = data.resultados.combinadas_reto_escalera;
 
-                    const contCombinada = document.getElementById('combinada-container');
-                    data.resultados.combinadas_reto_escalera.forEach(comb => {
-                        let partidosHtml = '';
-                        comb.partidos.forEach((partido, idx) => {
-                            partidosHtml += `<div class="mb-2 bg-slate-900 p-3 rounded border border-slate-700">
-                                <div class="font-bold text-white">${partido}</div>
-                                <div class="text-emerald-400 text-sm mt-1">Pronóstico: ${comb.pronosticos[idx]}</div>
-                            </div>`;
-                        });
+                    // Pintar Principal (Índice 0)
+                    document.getElementById('combinada-principal').innerHTML = generarTarjetaHTML(combinadasGlobal[0], true, 0);
 
-                        const evClass = comb.ev_conjunto.includes('-') ? 'ev-negative' : 'ev-positive';
-
-                        contCombinada.innerHTML += `
-                            <div class="card p-6 rounded-xl relative overflow-hidden border-2 border-emerald-500/50">
-                                <div class="absolute top-0 right-0 ${evClass} text-white text-xs font-bold px-3 py-1 rounded-bl-lg">EV ${comb.ev_conjunto}</div>
-                                <h3 class="text-lg font-bold mb-4 text-emerald-400">${comb.tipo}</h3>
-                                ${partidosHtml}
-                                <div class="mt-5 flex justify-between items-end border-t border-slate-700 pt-4">
-                                    <div>
-                                        <div class="text-slate-400 text-sm">Probabilidad Conjunta</div>
-                                        <div class="text-xl font-bold text-emerald-400">${comb.probabilidad_conjunta}</div>
-                                    </div>
-                                    <div class="text-right">
-                                        <div class="text-slate-400 text-sm">Cuota Final Bet365</div>
-                                        <div class="text-4xl font-extrabold text-white">${comb.cuota_total}</div>
-                                    </div>
-                                </div>
-                            </div>
-                        `;
-                    });
+                    // Pintar Descartes (Índice 1 a 3)
+                    let altsHtml = '';
+                    for(let i = 1; i < combinadasGlobal.length; i++) {
+                        altsHtml += generarTarjetaHTML(combinadasGlobal[i], false, i);
+                    }
+                    document.getElementById('combinadas-alternativas').innerHTML = altsHtml;
 
                 } catch (error) {
                     document.getElementById('loading').classList.add('hidden');
                     const errContainer = document.getElementById('error-container');
                     errContainer.classList.remove('hidden');
-                    errContainer.innerHTML = `<p class="font-bold text-red-400">Error interno del servidor. Revisa los logs de Render.</p>`;
+                    errContainer.innerHTML = `<p class="font-bold text-red-400">Error interno del servidor.</p>`;
                 }
             }
 
